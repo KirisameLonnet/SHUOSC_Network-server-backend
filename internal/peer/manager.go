@@ -3,6 +3,7 @@ package peer
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"time"
@@ -47,6 +48,20 @@ type PeerManager interface {
 	Reconcile(ctx context.Context) error
 	ActivePeerCount(ctx context.Context) int
 	ServerPublicKey() wgtypes.Key
+
+	// RotateServerKey replaces the server's WireGuard private key and re-configures
+	// the interface. Returns the new public key (private key is never exposed).
+	RotateServerKey(newKey wgtypes.Key) (wgtypes.Key, error)
+
+	// WGEnabled reports whether the WireGuard interface is administratively up.
+	WGEnabled() (bool, error)
+
+	// SetWGEnabled brings the WireGuard interface up (true) or down (false).
+	SetWGEnabled(enabled bool) error
+
+	// ListenPort returns the UDP port that the WireGuard interface listens on.
+	// Returns 0 when the interface is not configured.
+	ListenPort() int
 }
 
 type PeerRegistration struct {
@@ -60,14 +75,14 @@ type PeerRegistration struct {
 }
 
 type PeerManagerImpl struct {
-	userStore   userStore
-	peerStore   peerStore
-	ipam        *IPAMImpl
-	wgClient    wgClient
-	wgInterface string
-	serverKey   wgtypes.Key
-	listenPort  int
-	endpoint    string
+	userStore        userStore
+	peerStore        peerStore
+	ipam             *IPAMImpl
+	wgClient         wgClient
+	wgInterface      string
+	serverPrivateKey wgtypes.Key
+	listenPort       int
+	endpoint         string
 }
 
 func NewPeerManager(
@@ -81,14 +96,14 @@ func NewPeerManager(
 	endpoint string,
 ) PeerManager {
 	return &PeerManagerImpl{
-		userStore:   userStore,
-		peerStore:   peerStore,
-		ipam:        ipam,
-		wgClient:    wgClient,
-		wgInterface: wgInterface,
-		serverKey:   serverKey,
-		listenPort:  listenPort,
-		endpoint:    endpoint,
+		userStore:        userStore,
+		peerStore:        peerStore,
+		ipam:             ipam,
+		wgClient:         wgClient,
+		wgInterface:      wgInterface,
+		serverPrivateKey: serverKey,
+		listenPort:       listenPort,
+		endpoint:         endpoint,
 	}
 }
 
@@ -161,7 +176,7 @@ func (m *PeerManagerImpl) AddPeer(ctx context.Context, userID string, pubKey wgt
 		AssignedIP:          assignedIP,
 		AllowedIPs:          []string{m.ipam.subnet.String()},
 		Endpoint:            m.endpoint,
-		ServerPublicKey:     m.serverKey.String(),
+		ServerPublicKey:     m.ServerPublicKey().String(),
 		PersistentKeepalive: 25,
 		Connected:           false,
 	}, nil
@@ -245,7 +260,7 @@ func (m *PeerManagerImpl) GetPeerConfig(ctx context.Context, userID string, pubK
 		AssignedIP:          targetPeer.AssignedIP,
 		AllowedIPs:          []string{m.ipam.subnet.String()},
 		Endpoint:            m.endpoint,
-		ServerPublicKey:     m.serverKey.String(),
+		ServerPublicKey:     m.ServerPublicKey().String(),
 		PersistentKeepalive: 25,
 		Connected:           connected,
 	}, nil
@@ -378,7 +393,139 @@ func (m *PeerManagerImpl) ActivePeerCount(ctx context.Context) int {
 }
 
 func (m *PeerManagerImpl) ServerPublicKey() wgtypes.Key {
-	return m.serverKey
+	return m.serverPrivateKey.PublicKey()
+}
+
+func (m *PeerManagerImpl) ListenPort() int {
+	return m.listenPort
+}
+
+// RotateServerKey replaces the server's WireGuard private key in-place,
+// reconfigures the kernel interface, and returns the derived public key.
+// All existing peers are preserved — only the server identity changes.
+// The new private key must be provided by the caller; it is never persisted or exposed.
+func (m *PeerManagerImpl) RotateServerKey(newKey wgtypes.Key) (wgtypes.Key, error) {
+	// Collect existing peers so we can re-add them under the new identity
+	existingPeers, err := m.peerStore.ListActive(context.Background())
+	if err != nil {
+		return wgtypes.Key{}, fmt.Errorf("rotate server key: list active peers: %w", err)
+	}
+
+	var peerCfgs []wgtypes.PeerConfig
+	for _, p := range existingPeers {
+		pubKey, err := wgtypes.ParseKey(p.PublicKey)
+		if err != nil {
+			slog.Warn("rotate server key: skip peer with invalid key", "peer_id", p.ID, "error", err)
+			continue
+		}
+		allowedIP := net.ParseIP(p.AssignedIP)
+		if allowedIP == nil {
+			slog.Warn("rotate server key: skip peer with invalid ip", "peer_id", p.ID, "assigned_ip", p.AssignedIP)
+			continue
+		}
+		peerCfgs = append(peerCfgs, wgtypes.PeerConfig{
+			PublicKey:         pubKey,
+			ReplaceAllowedIPs: true,
+			AllowedIPs: []net.IPNet{
+				{IP: allowedIP, Mask: net.CIDRMask(32, 32)},
+			},
+		})
+	}
+
+	// Apply: new private key + re-add all peers atomically
+	cfg := wgtypes.Config{
+		PrivateKey:   &newKey,
+		ReplacePeers: true,
+		Peers:        peerCfgs,
+	}
+	if err := m.wgClient.ConfigureDevice(m.wgInterface, cfg); err != nil {
+		return wgtypes.Key{}, fmt.Errorf("rotate server key: configure device: %w", err)
+	}
+
+	m.serverPrivateKey = newKey
+
+	return newKey.PublicKey(), nil
+}
+
+// WGEnabled reports whether the WireGuard interface is administratively up
+// by checking the device exists and has a private key set.
+func (m *PeerManagerImpl) WGEnabled() (bool, error) {
+	dev, err := m.wgClient.Device(m.wgInterface)
+	if err != nil {
+		return false, nil // device not found → not enabled
+	}
+	return dev.PrivateKey != (wgtypes.Key{}), nil
+}
+
+// SetWGEnabled brings the WireGuard interface up or down.
+// When disabling, the private key is cleared (all peers are removed).
+// When enabling, the private key and all active peers are restored.
+func (m *PeerManagerImpl) SetWGEnabled(enabled bool) error {
+	if enabled {
+		return m.enableWG()
+	}
+	return m.disableWG()
+}
+
+func (m *PeerManagerImpl) enableWG() error {
+	// Collect active peers from DB
+	activePeers, err := m.peerStore.ListActive(context.Background())
+	if err != nil {
+		return fmt.Errorf("enable wg: list active peers: %w", err)
+	}
+
+	var peerCfgs []wgtypes.PeerConfig
+	for _, p := range activePeers {
+		pubKey, err := wgtypes.ParseKey(p.PublicKey)
+		if err != nil {
+			slog.Warn("enable wg: skip peer with invalid key", "peer_id", p.ID, "error", err)
+			continue
+		}
+		allowedIP := net.ParseIP(p.AssignedIP)
+		if allowedIP == nil {
+			slog.Warn("enable wg: skip peer with invalid ip", "peer_id", p.ID)
+			continue
+		}
+		peerCfgs = append(peerCfgs, wgtypes.PeerConfig{
+			PublicKey: pubKey,
+			AllowedIPs: []net.IPNet{
+				{IP: allowedIP, Mask: net.CIDRMask(32, 32)},
+			},
+		})
+	}
+
+	// Set private key + listen port + all peers
+	cfg := wgtypes.Config{
+		PrivateKey:   &m.serverPrivateKey,
+		ListenPort:   &m.listenPort,
+		ReplacePeers: true,
+		Peers:        peerCfgs,
+	}
+	if err := m.wgClient.ConfigureDevice(m.wgInterface, cfg); err != nil {
+		return fmt.Errorf("enable wg: configure device: %w", err)
+	}
+
+	slog.Info("wireguard interface enabled",
+		"interface", m.wgInterface,
+		"peers", len(peerCfgs),
+		"listen_port", m.listenPort,
+	)
+	return nil
+}
+
+func (m *PeerManagerImpl) disableWG() error {
+	// Remove all peers and clear private key
+	cfg := wgtypes.Config{
+		PrivateKey:   &wgtypes.Key{}, // zero key = clear
+		ReplacePeers: true,
+		Peers:        nil,
+	}
+	if err := m.wgClient.ConfigureDevice(m.wgInterface, cfg); err != nil {
+		return fmt.Errorf("disable wg: configure device: %w", err)
+	}
+
+	slog.Info("wireguard interface disabled", "interface", m.wgInterface)
+	return nil
 }
 
 var _ PeerManager = (*PeerManagerImpl)(nil)

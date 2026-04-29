@@ -11,6 +11,8 @@ import (
 	"github.com/shuosc/scnet-server/internal/admin"
 	"github.com/shuosc/scnet-server/internal/peer"
 	"github.com/shuosc/scnet-server/internal/store"
+
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
 type AdminHandler struct {
@@ -490,4 +492,93 @@ func (h *AdminHandler) AdminDeleteInvite(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+// ───────────────────── WireGuard Server Management ─────────────────────
+
+type wgStatusResponse struct {
+	Enabled    bool   `json:"enabled"`
+	PublicKey  string `json:"public_key"`
+	ListenPort int    `json:"listen_port"`
+	PeersCount int    `json:"peers_count"`
+}
+
+func (h *AdminHandler) AdminGetWGStatus(c *gin.Context) {
+	enabled, err := h.peerManager.WGEnabled()
+	if err != nil {
+		slog.Error("admin wg status: query failed", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error", "code": "INTERNAL_ERROR"})
+		return
+	}
+
+	resp := wgStatusResponse{
+		Enabled:    enabled,
+		PublicKey:  h.peerManager.ServerPublicKey().String(),
+		ListenPort: h.peerManager.ListenPort(),
+		PeersCount: h.peerManager.ActivePeerCount(c.Request.Context()),
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status": "ok",
+		"wg":     resp,
+	})
+}
+
+type rotateWGKeyRequest struct {
+	PrivateKey string `json:"private_key" binding:"required"`
+}
+
+func (h *AdminHandler) AdminRotateWGKey(c *gin.Context) {
+	var req rotateWGKeyRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "private_key is required", "code": "INVALID_REQUEST"})
+		return
+	}
+
+	newPrivKey, err := wgtypes.ParseKey(req.PrivateKey)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid wireguard private key", "code": "INVALID_KEY"})
+		return
+	}
+
+	newPubKey, err := h.peerManager.RotateServerKey(newPrivKey)
+	if err != nil {
+		slog.Error("admin rotate wg key failed", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "rotate server key failed", "code": "INTERNAL_ERROR"})
+		return
+	}
+
+	slog.Info("server wireguard key rotated successfully")
+	c.JSON(http.StatusOK, gin.H{
+		"status":     "ok",
+		"public_key": newPubKey.String(),
+	})
+}
+
+type toggleWGRequest struct {
+	Enabled bool `json:"enabled"`
+}
+
+func (h *AdminHandler) AdminToggleWG(c *gin.Context) {
+	var req toggleWGRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body", "code": "INVALID_REQUEST"})
+		return
+	}
+
+	if err := h.peerManager.SetWGEnabled(req.Enabled); err != nil {
+		slog.Error("admin toggle wg failed", "error", err, "requested", req.Enabled)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "toggle wireguard failed", "code": "INTERNAL_ERROR"})
+		return
+	}
+
+	state := "disabled"
+	if req.Enabled {
+		state = "enabled"
+	}
+	slog.Info("wireguard interface toggled", "state", state)
+	c.JSON(http.StatusOK, gin.H{
+		"status":  "ok",
+		"enabled": req.Enabled,
+	})
 }

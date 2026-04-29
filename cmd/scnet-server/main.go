@@ -7,7 +7,9 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -104,6 +106,12 @@ func main() {
 		cfg.WireGuard.ListenPort,
 		endpoint,
 	)
+	if err := ensureWireGuardReady(ctx, cfg.WireGuard.Interface, peerManager); err != nil {
+		slog.Error("failed to initialize wireguard interface", "error", err, "interface", cfg.WireGuard.Interface)
+		os.Exit(1)
+	}
+	slog.Info("wireguard interface ready", "interface", cfg.WireGuard.Interface, "listen_port", cfg.WireGuard.ListenPort)
+
 	adminService := admin.NewAdminService(userStore, peerStore, inviteStore)
 
 	router := api.SetupRouter(
@@ -124,7 +132,7 @@ func main() {
 		URL:     cfg.Discovery.DiscoveryURL,
 		Secret:  cfg.Discovery.DiscoverySecret,
 	}
-	reporter := discovery.NewReporter(reporterCfg, cfg.Discovery.ApiAddr, cfg.Discovery.WgEndpoint)
+	reporter := discovery.NewReporter(reporterCfg, cfg.Discovery.ApiAddr, endpoint)
 	go reporter.Start(ctx)
 
 	srv := &http.Server{
@@ -180,6 +188,45 @@ func bootstrapAdmin(ctx context.Context, userStore store.UserStore, cfg config.A
 	}
 
 	slog.Info("admin user bootstrapped", "student_id", admin.StudentID)
+	return nil
+}
+
+func ensureWireGuardReady(ctx context.Context, iface string, pm peer.PeerManager) error {
+	if err := ensureWireGuardInterface(ctx, iface); err != nil {
+		return err
+	}
+	if err := pm.SetWGEnabled(true); err != nil {
+		return fmt.Errorf("configure interface %q: %w", iface, err)
+	}
+	return nil
+}
+
+func ensureWireGuardInterface(ctx context.Context, iface string) error {
+	if strings.TrimSpace(iface) == "" {
+		return fmt.Errorf("wireguard interface is required")
+	}
+
+	if _, err := exec.LookPath("ip"); err != nil {
+		return fmt.Errorf("find ip command: %w", err)
+	}
+
+	if err := runIPCommand(ctx, "link", "add", "dev", iface, "type", "wireguard"); err != nil && !strings.Contains(err.Error(), "File exists") {
+		return fmt.Errorf("create wireguard interface %q: %w", iface, err)
+	}
+
+	if err := runIPCommand(ctx, "link", "set", "up", "dev", iface); err != nil {
+		return fmt.Errorf("bring wireguard interface %q up: %w", iface, err)
+	}
+
+	return nil
+}
+
+func runIPCommand(ctx context.Context, args ...string) error {
+	cmd := exec.CommandContext(ctx, "ip", args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ip %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+	}
 	return nil
 }
 

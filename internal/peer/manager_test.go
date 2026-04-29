@@ -59,6 +59,51 @@ func (c *fakeWGClient) Device(_ string) (*wgtypes.Device, error) {
 	return c.device, nil
 }
 
+type addPeerUserStore struct {
+	user *model.User
+}
+
+func (s *addPeerUserStore) FindByID(context.Context, uuid.UUID) (*model.User, error) {
+	return s.user, nil
+}
+
+type addPeerStore struct {
+	createdPeer *model.Peer
+}
+
+func (s *addPeerStore) Create(_ context.Context, peer *model.Peer) error {
+	s.createdPeer = peer
+	return nil
+}
+
+func (s *addPeerStore) FindActiveByUserID(context.Context, uuid.UUID) ([]*model.Peer, error) {
+	return nil, nil
+}
+
+func (s *addPeerStore) FindByID(context.Context, uuid.UUID) (*model.Peer, error) {
+	return nil, nil
+}
+
+func (s *addPeerStore) ListActive(context.Context) ([]*model.Peer, error) {
+	return nil, nil
+}
+
+func (s *addPeerStore) CountActiveByUserID(context.Context, uuid.UUID) (int, error) {
+	return 0, nil
+}
+
+func (s *addPeerStore) UpdateStatus(context.Context, uuid.UUID, string) error {
+	return nil
+}
+
+func (s *addPeerStore) UpdatePublicKey(context.Context, uuid.UUID, string) error {
+	return nil
+}
+
+func (s *addPeerStore) UpdateLastSeen(context.Context, uuid.UUID, time.Time) error {
+	return nil
+}
+
 func TestPeerManagerReconcileSyncsState(t *testing.T) {
 	t.Parallel()
 
@@ -78,7 +123,7 @@ func TestPeerManagerReconcileSyncsState(t *testing.T) {
 	}
 	wgClient := &fakeWGClient{
 		device: &wgtypes.Device{
-			Name: "wg0",
+			Name: "wg_scnet",
 			Peers: []wgtypes.Peer{
 				{PublicKey: dbAndWGKey, LastHandshakeTime: handshakeAt},
 				{PublicKey: wgOnlyKey},
@@ -90,7 +135,7 @@ func TestPeerManagerReconcileSyncsState(t *testing.T) {
 		t.Fatalf("NewIPAM returned error: %v", err)
 	}
 
-	manager := NewPeerManager(nil, ps, ipam, wgClient, "wg0", mustPrivateKey(t), 51820, "localhost:51820")
+	manager := NewPeerManager(nil, ps, ipam, wgClient, "wg_scnet", mustPrivateKey(t), 51820, "localhost:51820")
 
 	if err := manager.Reconcile(context.Background()); err != nil {
 		t.Fatalf("Reconcile returned error: %v", err)
@@ -134,6 +179,41 @@ func TestPeerManagerReconcileSyncsState(t *testing.T) {
 	}
 	if nextIP != "10.0.0.3" {
 		t.Fatalf("expected next allocated IP to skip reserved peers and be 10.0.0.3, got %s", nextIP)
+	}
+}
+
+func TestAddPeerReturnsServerPublicKeyInsteadOfPrivateKey(t *testing.T) {
+	t.Parallel()
+
+	serverPrivateKey := mustPrivateKey(t)
+	userID := uuid.New()
+	userStore := &addPeerUserStore{
+		user: &model.User{
+			ID:       userID,
+			Role:     "user",
+			Status:   "active",
+			MaxPeers: 5,
+		},
+	}
+	peerStore := &addPeerStore{}
+	wgClient := &fakeWGClient{device: &wgtypes.Device{Name: "wg_scnet"}}
+
+	ipam, err := NewIPAM("10.0.0.0/29")
+	if err != nil {
+		t.Fatalf("NewIPAM returned error: %v", err)
+	}
+
+	manager := NewPeerManager(userStore, peerStore, ipam, wgClient, "wg_scnet", serverPrivateKey, 51820, "vpn.example.com:51820")
+	registration, err := manager.AddPeer(context.Background(), userID.String(), mustPrivateKey(t).PublicKey())
+	if err != nil {
+		t.Fatalf("AddPeer returned error: %v", err)
+	}
+
+	if registration.ServerPublicKey != serverPrivateKey.PublicKey().String() {
+		t.Fatalf("expected server public key %q, got %q", serverPrivateKey.PublicKey().String(), registration.ServerPublicKey)
+	}
+	if registration.ServerPublicKey == serverPrivateKey.String() {
+		t.Fatal("registration leaked the server private key")
 	}
 }
 

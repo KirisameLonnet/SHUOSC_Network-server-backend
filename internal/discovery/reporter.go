@@ -4,9 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 )
 
@@ -31,7 +32,7 @@ type reportPayload struct {
 func NewReporter(cfg ReporterConfig, apiAddr, wgEndpoint string) *Reporter {
 	return &Reporter{
 		cfg:        cfg,
-		apiAddr:    apiAddr,
+		apiAddr:    APIURL(apiAddr),
 		wgEndpoint: wgEndpoint,
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
@@ -67,6 +68,10 @@ func (r *Reporter) report(ctx context.Context) {
 		ApiURL:     r.apiAddr,
 		WgEndpoint: r.wgEndpoint,
 	}
+	if payload.ApiURL == "" {
+		slog.Warn("discovery reporter skipped empty api_url")
+		return
+	}
 
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -95,12 +100,32 @@ func (r *Reporter) report(ctx context.Context) {
 		return
 	}
 
-	slog.Debug("discovery reporter success", "api_url", r.apiAddr, "wg_endpoint", r.wgEndpoint)
+	slog.Debug("discovery reporter success", "api_url", payload.ApiURL, "wg_endpoint", payload.WgEndpoint)
 }
 
 func APIURL(addr string) string {
+	addr = strings.TrimSpace(addr)
 	if addr == "" {
 		return ""
 	}
-	return fmt.Sprintf("https://%s/api/v1", addr)
+
+	if !strings.Contains(addr, "://") {
+		addr = "https://" + addr
+	}
+
+	parsed, err := url.Parse(addr)
+	if err != nil || parsed.Host == "" {
+		return ""
+	}
+
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	parsed.Path = strings.TrimRight(parsed.Path, "/")
+	if parsed.Path == "" {
+		parsed.Path = "/api/v1"
+	} else if !strings.HasSuffix(parsed.Path, "/api/v1") {
+		parsed.Path += "/api/v1"
+	}
+
+	return parsed.String()
 }

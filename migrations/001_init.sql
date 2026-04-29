@@ -1,7 +1,7 @@
 -- +migrate Up
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
-CREATE TABLE users (
+CREATE TABLE IF NOT EXISTS users (
     id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     student_id VARCHAR(20) UNIQUE NOT NULL,
     password   VARCHAR(255) NOT NULL,
@@ -18,7 +18,7 @@ CREATE TABLE users (
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE TABLE invite_codes (
+CREATE TABLE IF NOT EXISTS invite_codes (
     id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     code       VARCHAR(32) UNIQUE NOT NULL,
     created_by UUID,
@@ -29,7 +29,7 @@ CREATE TABLE invite_codes (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE TABLE peers (
+CREATE TABLE IF NOT EXISTS peers (
     id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id    UUID REFERENCES users(id) NOT NULL,
     public_key VARCHAR(64) UNIQUE NOT NULL,
@@ -40,11 +40,11 @@ CREATE TABLE peers (
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX idx_users_student_id ON users(student_id);
-CREATE INDEX idx_peers_user_id ON peers(user_id);
-CREATE INDEX idx_peers_public_key ON peers(public_key);
-CREATE INDEX idx_peers_user_status ON peers(user_id, status);
-CREATE INDEX idx_invite_codes_code ON invite_codes(code);
+CREATE INDEX IF NOT EXISTS idx_users_student_id ON users(student_id);
+CREATE INDEX IF NOT EXISTS idx_peers_user_id ON peers(user_id);
+CREATE INDEX IF NOT EXISTS idx_peers_public_key ON peers(public_key);
+CREATE INDEX IF NOT EXISTS idx_peers_user_status ON peers(user_id, status);
+CREATE INDEX IF NOT EXISTS idx_invite_codes_code ON invite_codes(code);
 
 -- +migrate Down
 DROP TABLE IF EXISTS peers;

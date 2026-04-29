@@ -29,12 +29,12 @@ func (h *HealthHandler) Health(c *gin.Context) {
 		}
 	}
 
-	wgStatus := "inactive"
+	wgStatus := "disabled"
 	peersCount := 0
 	if h.peerManager != nil {
-		peersCount = h.peerManager.ActivePeerCount(c.Request.Context())
-		if peersCount >= 0 {
+		if enabled, _ := h.peerManager.WGEnabled(); enabled {
 			wgStatus = "active"
+			peersCount = h.peerManager.ActivePeerCount(c.Request.Context())
 		}
 	}
 

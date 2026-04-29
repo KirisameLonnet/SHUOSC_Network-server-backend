@@ -79,6 +79,11 @@ func SetupRouter(
 	adminGroup.PUT("/invite/:id", adminHandler.AdminUpdateInvite)
 	adminGroup.DELETE("/invite/:id", adminHandler.AdminDeleteInvite)
 
+	// WireGuard server management
+	adminGroup.GET("/wg", adminHandler.AdminGetWGStatus)
+	adminGroup.POST("/wg/rotate-key", adminHandler.AdminRotateWGKey)
+	adminGroup.POST("/wg/toggle", adminHandler.AdminToggleWG)
+
 	spaDir := os.Getenv("SCNET_SPA_DIR")
 	if spaDir == "" {
 		spaDir = "admin-panel/dist/spa"

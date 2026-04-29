@@ -45,7 +45,7 @@ func (d DatabaseConfig) DSN() string {
 
 // WireGuardConfig holds WireGuard interface settings.
 type WireGuardConfig struct {
-	Interface  string `yaml:"interface"`   // default: "wg0"
+	Interface  string `yaml:"interface"`   // default: "wg_scnet"
 	ListenPort int    `yaml:"listen_port"` // default: 51820
 	PrivateKey string `yaml:"private_key"` // server WG private key (base64)
 	Subnet     string `yaml:"subnet"`      // default: "10.100.0.0/24"
@@ -92,7 +92,7 @@ func DefaultConfig() *Config {
 			SSLMode: "disable",
 		},
 		WireGuard: WireGuardConfig{
-			Interface:  "wg0",
+			Interface:  "wg_scnet",
 			ListenPort: 51820,
 			Subnet:     "10.100.0.0/24",
 		},
