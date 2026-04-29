@@ -1,0 +1,5 @@
+.git
+.env
+scnet-server
+admin-panel/dist/
+.DS_Store

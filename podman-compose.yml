@@ -1,0 +1,44 @@
+version: "3"
+
+services:
+  db:
+    image: docker.io/library/postgres:17-alpine
+    environment:
+      POSTGRES_USER: scnet
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: scnet
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U scnet -d scnet"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  server:
+    build:
+      context: .
+      dockerfile: Containerfile
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun
+    ports:
+      - "8080:8080"
+      - "51820:51820/udp"
+    environment:
+      SCNET_WG_PRIVATE_KEY: ${SCNET_WG_PRIVATE_KEY}
+      SCNET_JWT_SECRET: ${SCNET_JWT_SECRET}
+      SCNET_DB_PASSWORD: ${DB_PASSWORD}
+      SCNET_ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+    volumes:
+      - ./config.yaml:/etc/scnet/config.yaml:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+    name: shuosc_network_pgdata

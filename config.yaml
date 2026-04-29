@@ -1,0 +1,31 @@
+server:
+  port: 8080
+
+database:
+  host: db
+  port: 5432
+  user: scnet
+  password: "${SCNET_DB_PASSWORD}"
+  name: scnet
+  sslmode: disable
+
+wireguard:
+  interface: wg_scnet
+  listen_port: 51820
+  private_key: "${SCNET_WG_PRIVATE_KEY}"
+  subnet: 10.100.0.0/24
+
+jwt:
+  secret: "${SCNET_JWT_SECRET}"
+  expiry_hours: 24
+
+invite:
+  default_max_uses: 1
+  default_expiry_days: 30
+
+admin:
+  student_id: "admin"
+  password: "${SCNET_ADMIN_PASSWORD}"
+
+discovery:
+  enabled: false

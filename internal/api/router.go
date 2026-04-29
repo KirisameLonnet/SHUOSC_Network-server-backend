@@ -84,6 +84,13 @@ func SetupRouter(
 	adminGroup.POST("/wg/rotate-key", adminHandler.AdminRotateWGKey)
 	adminGroup.POST("/wg/toggle", adminHandler.AdminToggleWG)
 
+	if !spaServingEnabled() {
+		r.NoRoute(func(c *gin.Context) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		})
+		return r
+	}
+
 	spaDir := os.Getenv("SCNET_SPA_DIR")
 	if spaDir == "" {
 		spaDir = "admin-panel/dist/spa"
@@ -107,6 +114,10 @@ func SetupRouter(
 	})
 
 	return r
+}
+
+func spaServingEnabled() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("SCNET_ENABLE_SPA_SERVING")), "true")
 }
 
 func corsMiddleware() gin.HandlerFunc {
