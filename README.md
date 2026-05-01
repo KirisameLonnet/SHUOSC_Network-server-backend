@@ -12,6 +12,7 @@
 这个仓库包含：
 
 - `cmd/scnet-server`：服务端入口
+- `cmd/scnet-relay-agent`：Cloudflare 反向 HTTP relay agent
 - `internal/api`：HTTP API、认证中间件、路由
 - `internal/account`：账户自助能力
 - `internal/admin`：管理员能力
@@ -134,6 +135,37 @@ ADMIN_PASSWORD=replace_with_bootstrap_admin_password
 
 如果你改动部署拓扑，优先同步修改 `config.yaml`，不要把密钥硬编码进仓库。
 
+## 检查当前后端状态
+
+本机后端 API 状态：
+
+```bash
+curl http://127.0.0.1:8080/health
+```
+
+预期：
+
+```json
+{"db":"connected","peers":0,"status":"ok","wg":"active"}
+```
+
+Cloudflare Worker 地址发现状态：
+
+```bash
+curl https://scnet-test.lonnet.uk/api/server-info
+```
+
+如果返回了 `api_url`，说明前端/Worker 发现层已经上线。
+
+Cloudflare relay 当前是否接通后端：
+
+```bash
+curl https://scnet-test.lonnet.uk/health
+```
+
+- 返回 `200`：说明 relay agent 已接通后端
+- 返回 `503 {"code":"RELAY_UNAVAILABLE"}`：说明 Worker 在线，但 relay agent 还没连上
+
 ## 启动后端 Podman 部署
 
 从本仓库根目录执行：
@@ -204,6 +236,90 @@ podman compose -p shuosc_network -f podman-compose.yml logs server
 - `admin user bootstrapped`（仅空库首次启动）
 - `wireguard interface ready`
 - `starting server addr=:8080`
+
+## 连接后端到 scnet-test.lonnet.uk
+
+当前 Cloudflare Worker 已经提供：
+
+- `https://scnet-test.lonnet.uk/api/server-info`
+- `https://scnet-test.lonnet.uk/_agent/connect`
+- `https://scnet-test.lonnet.uk/_agent/status`
+
+真正把本机后端 API 接到这个域名，需要运行 `scnet-relay-agent`，让它主动通过 WebSocket 连接到 Worker。
+
+### 需要的 Cloudflare 运行时变量
+
+在 Worker 面板中至少设置：
+
+- `SCNET_AGENT_TOKEN`：必须，建议机密
+- `SCNET_RELAY_TIMEOUT_MS=20000`
+- `SCNET_RELAY_CHANNEL=default`
+
+### 需要的本地环境变量
+
+在本仓库 `.env` 中补充：
+
+```dotenv
+SCNET_AGENT_URL=https://scnet-test.lonnet.uk/_agent/connect
+SCNET_AGENT_TOKEN=replace_with_same_cloudflare_secret
+SCNET_AGENT_ID=shuosc-network-podman
+SCNET_AGENT_BACKEND_URL=http://server:8080
+SCNET_AGENT_PING_INTERVAL_MS=15000
+SCNET_AGENT_REQUEST_TIMEOUT_MS=20000
+SCNET_AGENT_RECONNECT_DELAY_MS=3000
+```
+
+说明：
+
+- `SCNET_AGENT_TOKEN` 必须与 Cloudflare Worker 中的 `SCNET_AGENT_TOKEN` 完全一致
+- `SCNET_AGENT_BACKEND_URL=http://server:8080` 是给容器内 relay-agent 使用的
+- 如果你在宿主机直接运行 agent，则把 `SCNET_AGENT_BACKEND_URL` 改成 `http://127.0.0.1:8080`
+
+### 方式 1：直接运行 agent（宿主机）
+
+```bash
+go run ./cmd/scnet-relay-agent \
+  -url https://scnet-test.lonnet.uk/_agent/connect \
+  -token "$SCNET_AGENT_TOKEN" \
+  -backend http://127.0.0.1:8080
+```
+
+### 方式 2：Podman Compose 运行 agent（推荐）
+
+`podman-compose.yml` 已新增可选 `relay-agent` 服务，使用 `relay` profile：
+
+```bash
+podman compose -p shuosc_network -f podman-compose.yml --env-file .env --profile relay up -d relay-agent
+```
+
+如果你的环境使用 `podman-compose` 命令：
+
+```bash
+podman-compose -p shuosc_network --env-file .env --profile relay up -d relay-agent
+```
+
+### 接通后的检查
+
+检查 agent 状态：
+
+```bash
+curl -H "Authorization: Bearer $SCNET_AGENT_TOKEN" \
+  https://scnet-test.lonnet.uk/_agent/status
+```
+
+接通后预期字段包括：
+
+- `"connected": true`
+- `"pending": 0`
+
+检查 Cloudflare 域名是否已经真正回到本机后端：
+
+```bash
+curl https://scnet-test.lonnet.uk/health
+curl https://scnet-test.lonnet.uk/version
+```
+
+这两个接口返回成功，说明 `scnet-test.lonnet.uk` 到本机后端的反向链路已经打通。
 
 ## 常用运维命令
 

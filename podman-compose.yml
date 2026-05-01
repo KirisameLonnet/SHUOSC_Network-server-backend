@@ -39,6 +39,26 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  relay-agent:
+    profiles:
+      - relay
+    build:
+      context: .
+      dockerfile: Containerfile
+    entrypoint: ["/usr/local/bin/scnet-relay-agent"]
+    environment:
+      SCNET_AGENT_URL: ${SCNET_AGENT_URL}
+      SCNET_AGENT_TOKEN: ${SCNET_AGENT_TOKEN}
+      SCNET_AGENT_ID: ${SCNET_AGENT_ID:-shuosc-network-podman}
+      SCNET_AGENT_BACKEND_URL: ${SCNET_AGENT_BACKEND_URL:-http://server:8080}
+      SCNET_AGENT_PING_INTERVAL_MS: ${SCNET_AGENT_PING_INTERVAL_MS:-15000}
+      SCNET_AGENT_REQUEST_TIMEOUT_MS: ${SCNET_AGENT_REQUEST_TIMEOUT_MS:-20000}
+      SCNET_AGENT_RECONNECT_DELAY_MS: ${SCNET_AGENT_RECONNECT_DELAY_MS:-3000}
+    depends_on:
+      server:
+        condition: service_started
+    restart: unless-stopped
+
 volumes:
   pgdata:
     name: shuosc_network_pgdata

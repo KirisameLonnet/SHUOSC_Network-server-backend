@@ -1,3 +1,4 @@
 /scnet-server
+/scnet-relay-agent
 .env
 .DS_Store
