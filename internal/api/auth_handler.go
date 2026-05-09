@@ -16,7 +16,7 @@ type AuthHandler struct {
 type registerRequest struct {
 	StudentID  string `json:"student_id" binding:"required"`
 	Password   string `json:"password" binding:"required"`
-	InviteCode string `json:"invite_code" binding:"required"`
+	InviteCode string `json:"invite_code"`
 }
 
 type loginRequest struct {

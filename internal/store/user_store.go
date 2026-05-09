@@ -17,10 +17,12 @@ import (
 var (
 	ErrStudentIDTaken    = errors.New("student ID already taken")
 	ErrInviteUnavailable = errors.New("invalid or expired invite code")
+	ErrBootstrapClosed   = errors.New("bootstrap registration is closed")
 )
 
 type UserStore interface {
 	Create(ctx context.Context, user *model.User) error
+	RegisterBootstrapAdmin(ctx context.Context, user *model.User) error
 	RegisterWithInvite(ctx context.Context, user *model.User, inviteCode string) error
 	FindByStudentID(ctx context.Context, studentID string) (*model.User, error)
 	FindByID(ctx context.Context, id uuid.UUID) (*model.User, error)
@@ -81,7 +83,54 @@ func (s *userStore) Create(ctx context.Context, user *model.User) error {
 		user.Telegram, user.MaxPeers, user.Status,
 	).Scan(&user.ID, &user.CreatedAt, &user.UpdatedAt)
 	if err != nil {
+		if isUniqueViolation(err) {
+			return ErrStudentIDTaken
+		}
 		return fmt.Errorf("create user: %w", err)
+	}
+	return nil
+}
+
+func (s *userStore) RegisterBootstrapAdmin(ctx context.Context, user *model.User) (err error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin bootstrap registration transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback(ctx)
+		}
+	}()
+
+	if _, err = tx.Exec(ctx, `LOCK TABLE users IN EXCLUSIVE MODE`); err != nil {
+		return fmt.Errorf("lock users table: %w", err)
+	}
+
+	var count int
+	if err = tx.QueryRow(ctx, `SELECT COUNT(*) FROM users`).Scan(&count); err != nil {
+		return fmt.Errorf("count users: %w", err)
+	}
+	if count != 0 {
+		return ErrBootstrapClosed
+	}
+
+	insertQuery := `
+		INSERT INTO users (student_id, password, role, invite_id, display_name, email, phone, wechat, telegram, max_peers, status)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		RETURNING id, created_at, updated_at`
+	if scanErr := tx.QueryRow(ctx, insertQuery,
+		user.StudentID, user.Password, user.Role, user.InviteID,
+		user.DisplayName, user.Email, user.Phone, user.Wechat,
+		user.Telegram, user.MaxPeers, user.Status,
+	).Scan(&user.ID, &user.CreatedAt, &user.UpdatedAt); scanErr != nil {
+		if isUniqueViolation(scanErr) {
+			return ErrStudentIDTaken
+		}
+		return fmt.Errorf("create bootstrap admin: %w", scanErr)
+	}
+
+	if err = tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit bootstrap registration transaction: %w", err)
 	}
 	return nil
 }

@@ -15,6 +15,21 @@ wireguard:
   private_key: "${SCNET_WG_PRIVATE_KEY}"
   subnet: 10.100.0.0/24
 
+punch:
+  enabled: false
+  listen_port: 51280
+  wireguard_host: 127.0.0.1
+  wireguard_port: 51820
+  # Mainland-oriented public STUN candidates; override with SCNET_STUN_SERVERS if needed.
+  stun_servers:
+    - stun.miwifi.com:3478
+    - stun.qq.com:3478
+    - stun.hitv.com:3478
+    - stun.chat.bilibili.com:3478
+    - stun.douyucdn.cn:18000
+  probe_timeout_seconds: 5
+  keepalive_interval_seconds: 20
+
 jwt:
   secret: "${SCNET_JWT_SECRET}"
   expiry_hours: 24

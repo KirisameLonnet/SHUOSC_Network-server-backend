@@ -18,10 +18,10 @@ type ReporterConfig struct {
 }
 
 type Reporter struct {
-	cfg        ReporterConfig
-	apiAddr    string
-	wgEndpoint string
-	httpClient *http.Client
+	cfg             ReporterConfig
+	apiAddr         string
+	wgEndpointValue func() string
+	httpClient      *http.Client
 }
 
 type reportPayload struct {
@@ -30,10 +30,19 @@ type reportPayload struct {
 }
 
 func NewReporter(cfg ReporterConfig, apiAddr, wgEndpoint string) *Reporter {
+	return NewReporterFunc(cfg, apiAddr, func() string {
+		return wgEndpoint
+	})
+}
+
+func NewReporterFunc(cfg ReporterConfig, apiAddr string, wgEndpointValue func() string) *Reporter {
+	if wgEndpointValue == nil {
+		wgEndpointValue = func() string { return "" }
+	}
 	return &Reporter{
-		cfg:        cfg,
-		apiAddr:    APIURL(apiAddr),
-		wgEndpoint: wgEndpoint,
+		cfg:             cfg,
+		apiAddr:         APIURL(apiAddr),
+		wgEndpointValue: wgEndpointValue,
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
@@ -66,7 +75,7 @@ func (r *Reporter) Start(ctx context.Context) {
 func (r *Reporter) report(ctx context.Context) {
 	payload := reportPayload{
 		ApiURL:     r.apiAddr,
-		WgEndpoint: r.wgEndpoint,
+		WgEndpoint: r.wgEndpointValue(),
 	}
 	if payload.ApiURL == "" {
 		slog.Warn("discovery reporter skipped empty api_url")

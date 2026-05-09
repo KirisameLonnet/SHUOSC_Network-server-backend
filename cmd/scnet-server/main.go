@@ -13,16 +13,14 @@ import (
 	"syscall"
 	"time"
 
-	"golang.org/x/crypto/bcrypt"
-
 	"github.com/shuosc/scnet-server/config"
 	"github.com/shuosc/scnet-server/internal/account"
 	"github.com/shuosc/scnet-server/internal/admin"
 	"github.com/shuosc/scnet-server/internal/api"
 	"github.com/shuosc/scnet-server/internal/auth"
 	"github.com/shuosc/scnet-server/internal/discovery"
-	"github.com/shuosc/scnet-server/internal/model"
 	"github.com/shuosc/scnet-server/internal/peer"
+	"github.com/shuosc/scnet-server/internal/punch"
 	"github.com/shuosc/scnet-server/internal/store"
 
 	"golang.zx2c4.com/wireguard/wgctrl"
@@ -79,11 +77,6 @@ func main() {
 	peerStore := store.NewPeerStore(pool)
 	inviteStore := store.NewInviteStore(pool)
 
-	if err := bootstrapAdmin(ctx, userStore, cfg.Admin); err != nil {
-		slog.Error("failed to bootstrap admin user", "error", err)
-		os.Exit(1)
-	}
-
 	authService := auth.NewAuthService(userStore, inviteStore, cfg.JWT.Secret, cfg.JWT.ExpiryHours)
 	accountService := account.NewAccountService(userStore, peerStore)
 	ipamInstance, err := peer.NewIPAM(cfg.WireGuard.Subnet)
@@ -92,11 +85,27 @@ func main() {
 		os.Exit(1)
 	}
 
-	endpoint := cfg.Discovery.WgEndpoint
-	if endpoint == "" {
-		endpoint = fmt.Sprintf("%s:%d", "localhost", cfg.WireGuard.ListenPort)
+	endpoint, endpointSource, punchProxy, err := resolveWireGuardEndpoint(ctx, cfg)
+	if err != nil {
+		slog.Error("failed to resolve wireguard endpoint", "error", err)
+		os.Exit(1)
 	}
-	peerManager := peer.NewPeerManager(
+	if punchProxy != nil {
+		defer punchProxy.Close()
+	}
+	if cfg.Discovery.Enabled && endpointSource == "fallback" {
+		slog.Error("discovery enabled but no publishable WireGuard endpoint is configured")
+		os.Exit(1)
+	}
+	slog.Info("wireguard endpoint resolved", "endpoint", endpoint, "source", endpointSource)
+
+	var endpointValue func() string
+	if punchProxy != nil {
+		endpointValue = punchProxy.Endpoint
+	} else {
+		endpointValue = func() string { return endpoint }
+	}
+	peerManager := peer.NewPeerManagerWithEndpointFunc(
 		userStore,
 		peerStore,
 		ipamInstance,
@@ -104,7 +113,7 @@ func main() {
 		cfg.WireGuard.Interface,
 		serverKey,
 		cfg.WireGuard.ListenPort,
-		endpoint,
+		endpointValue,
 	)
 	if err := ensureWireGuardReady(ctx, cfg.WireGuard.Interface, peerManager); err != nil {
 		slog.Error("failed to initialize wireguard interface", "error", err, "interface", cfg.WireGuard.Interface)
@@ -132,7 +141,7 @@ func main() {
 		URL:     cfg.Discovery.DiscoveryURL,
 		Secret:  cfg.Discovery.DiscoverySecret,
 	}
-	reporter := discovery.NewReporter(reporterCfg, cfg.Discovery.ApiAddr, endpoint)
+	reporter := discovery.NewReporterFunc(reporterCfg, cfg.Discovery.ApiAddr, endpointValue)
 	go reporter.Start(ctx)
 
 	srv := &http.Server{
@@ -162,33 +171,33 @@ func main() {
 	slog.Info("server stopped")
 }
 
-func bootstrapAdmin(ctx context.Context, userStore store.UserStore, cfg config.AdminConfig) error {
-	count, err := userStore.Count(ctx)
-	if err != nil {
-		return fmt.Errorf("count users: %w", err)
-	}
-	if count > 0 {
-		return nil
+func resolveWireGuardEndpoint(ctx context.Context, cfg *config.Config) (string, string, *punch.Service, error) {
+	if strings.TrimSpace(cfg.Discovery.WgEndpoint) != "" {
+		return strings.TrimSpace(cfg.Discovery.WgEndpoint), "manual", nil, nil
 	}
 
-	hash, err := bcrypt.GenerateFromPassword([]byte(cfg.Password), 12)
-	if err != nil {
-		return fmt.Errorf("hash password: %w", err)
+	if cfg.Punch.Enabled {
+		wgPort := cfg.Punch.WireGuardPort
+		if wgPort <= 0 {
+			wgPort = cfg.WireGuard.ListenPort
+		}
+		probeTimeout := time.Duration(cfg.Punch.ProbeTimeoutSeconds) * time.Second
+		keepalive := time.Duration(cfg.Punch.KeepaliveIntervalSeconds) * time.Second
+		proxy, endpoint, err := punch.Start(ctx, punch.Config{
+			ListenPort:        cfg.Punch.ListenPort,
+			WireGuardHost:     cfg.Punch.WireGuardHost,
+			WireGuardPort:     wgPort,
+			STUNServers:       cfg.Punch.STUNServers,
+			ProbeTimeout:      probeTimeout,
+			KeepaliveInterval: keepalive,
+		}, slog.Default())
+		if err != nil {
+			return "", "", nil, err
+		}
+		return endpoint, "punch", proxy, nil
 	}
 
-	admin := &model.User{
-		StudentID: cfg.StudentID,
-		Password:  string(hash),
-		Role:      "admin",
-		MaxPeers:  1,
-		Status:    "active",
-	}
-	if err := userStore.Create(ctx, admin); err != nil {
-		return fmt.Errorf("create admin user: %w", err)
-	}
-
-	slog.Info("admin user bootstrapped", "student_id", admin.StudentID)
-	return nil
+	return fmt.Sprintf("%s:%d", "localhost", cfg.WireGuard.ListenPort), "fallback", nil, nil
 }
 
 func ensureWireGuardReady(ctx context.Context, iface string, pm peer.PeerManager) error {

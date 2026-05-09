@@ -28,6 +28,7 @@
 - 前端独立部署到 Cloudflare Pages
 - 后端部署入口文件与源码同仓维护，位于本仓库根目录
 - 只有在显式开启 `SCNET_ENABLE_SPA_SERVING=true` 时，后端才会尝试本地托管已存在的 SPA 构建产物
+- WireGuard 公网入口可手动配置，也可显式启用内置 STUN punch/proxy 自动发现
 
 如果你在构建日志里看到 npm/front-end build，说明你用的不是当前这套 backend-only 容器定义。
 
@@ -112,14 +113,14 @@ cp .env.example .env
 DB_PASSWORD=replace_with_postgres_password
 SCNET_WG_PRIVATE_KEY=replace_with_wireguard_private_key
 SCNET_JWT_SECRET=replace_with_long_random_secret
-ADMIN_PASSWORD=replace_with_bootstrap_admin_password
 ```
 
 说明：
 
 - `SCNET_WG_PRIVATE_KEY` 必须是 WireGuard 私钥（base64），可用 `wg genkey` 生成
 - `SCNET_JWT_SECRET` 应使用足够长的随机值，例如 `openssl rand -base64 64`
-- `ADMIN_PASSWORD` 仅用于首次空库启动时自举 `admin` 账户
+- 空库第一次通过注册页创建的账号会自动成为管理员，且不需要邀请码
+- 数据库已有用户后，注册必须提供管理员创建的邀请码
 - `DB_PASSWORD` 必须与 `podman-compose.yml` 中 PostgreSQL 容器使用的密码一致
 - `.env` 已被 `.gitignore` 忽略，不应提交到仓库
 
@@ -155,7 +156,8 @@ Cloudflare Worker 地址发现状态：
 curl https://scnet-test.lonnet.uk/api/server-info
 ```
 
-如果返回了 `api_url`，说明前端/Worker 发现层已经上线。
+如果返回了 `api_url` 和 `wg_endpoint`，说明后端已经向 Worker 上报动态发现信息。
+如果返回 `503 SERVER_INFO_UNAVAILABLE`，说明 Worker 在线，但后端还没有完成发现上报。
 
 Cloudflare relay 当前是否接通后端：
 
@@ -233,7 +235,6 @@ podman compose -p shuosc_network -f podman-compose.yml logs server
 - `config loaded`
 - `database connected`
 - `migrations complete`
-- `admin user bootstrapped`（仅空库首次启动）
 - `wireguard interface ready`
 - `starting server addr=:8080`
 
@@ -255,6 +256,9 @@ podman compose -p shuosc_network -f podman-compose.yml logs server
 - `SCNET_RELAY_TIMEOUT_MS=20000`
 - `SCNET_RELAY_CHANNEL=default`
 
+不要在 Worker 里把 `SCNET_WG_ENDPOINT` 填成 API URL。正常 relay 部署下，`wg_endpoint`
+由后端启动后 POST 到 Worker 的 `/api/server-info`，Worker 只保存和返回最新上报值。
+
 ### 需要的本地环境变量
 
 在本仓库 `.env` 中补充：
@@ -267,6 +271,11 @@ SCNET_AGENT_BACKEND_URL=http://server:8080
 SCNET_AGENT_PING_INTERVAL_MS=15000
 SCNET_AGENT_REQUEST_TIMEOUT_MS=20000
 SCNET_AGENT_RECONNECT_DELAY_MS=3000
+
+SCNET_DISCOVERY_ENABLED=true
+SCNET_DISCOVERY_URL=https://scnet-test.lonnet.uk/api/server-info
+SCNET_DISCOVERY_API_ADDR=https://scnet-test.lonnet.uk/api/v1
+SCNET_WG_ENDPOINT=replace_with_public_udp_endpoint_51820
 ```
 
 说明：
@@ -274,6 +283,49 @@ SCNET_AGENT_RECONNECT_DELAY_MS=3000
 - `SCNET_AGENT_TOKEN` 必须与 Cloudflare Worker 中的 `SCNET_AGENT_TOKEN` 完全一致
 - `SCNET_AGENT_BACKEND_URL=http://server:8080` 是给容器内 relay-agent 使用的
 - 如果你在宿主机直接运行 agent，则把 `SCNET_AGENT_BACKEND_URL` 改成 `http://127.0.0.1:8080`
+- discovery 上报默认复用 `SCNET_AGENT_TOKEN`，不需要单独配置第二个 secret
+- `SCNET_DISCOVERY_API_ADDR` 是浏览器/CLI 看到的 Cloudflare API 入口
+- `SCNET_WG_ENDPOINT` 是客户端直连 WireGuard 的 UDP `host:port`，不是 HTTPS API URL
+
+### WireGuard endpoint 发布方式
+
+优先级固定如下：
+
+1. 如果设置了 `SCNET_WG_ENDPOINT`，直接上报这个地址，不启用内置 STUN。
+2. 如果未设置 `SCNET_WG_ENDPOINT` 且 `SCNET_PUNCH_ENABLED=true`，后端启动内置 UDP punch/proxy，通过配置的 STUN server 探测公网 `ip:port` 后上报。
+3. 如果两者都没有，`SCNET_DISCOVERY_ENABLED=true` 会拒绝启动，避免把 `localhost:51820` 上报给 Worker。
+
+手动公网地址适合有公网 IP、端口映射、Lucky 或其他外部转发器的部署：
+
+```dotenv
+SCNET_DISCOVERY_ENABLED=true
+SCNET_WG_ENDPOINT=wg.example.com:51820
+SCNET_PUNCH_ENABLED=false
+```
+
+内置 STUN punch/proxy 适合没有固定外部端口但 NAT 支持 UDP endpoint-independent mapping 的部署：
+
+```dotenv
+SCNET_DISCOVERY_ENABLED=true
+SCNET_WG_ENDPOINT=
+SCNET_PUNCH_ENABLED=true
+SCNET_PUNCH_LISTEN_PORT=51280
+SCNET_PUNCH_WG_HOST=127.0.0.1
+SCNET_PUNCH_WG_PORT=51820
+# 留空时使用 config.yaml 内置候选；填写后会覆盖内置列表
+SCNET_STUN_SERVERS=
+SCNET_PUNCH_PROBE_TIMEOUT_SECONDS=5
+SCNET_PUNCH_KEEPALIVE_SECONDS=20
+```
+
+硬约束：
+
+- `config.yaml` 内置的 `punch.stun_servers` 只放中国大陆方向候选，不内置 Google/Cloudflare 等国外公共 STUN
+- `SCNET_STUN_SERVERS=host1:3478,host2:3478` 可在部署时覆盖内置列表
+- `SCNET_PUNCH_LISTEN_PORT` 不能与内核 WireGuard 的本机监听端口相同
+- `SCNET_PUNCH_LISTEN_PORT` 是容器内 punch/proxy socket，STUN 探测得到的公网端口可能不同；Worker 上报的是探测出来的公网 `ip:port`
+- 内置 punch/proxy 会把外部 UDP 流量转发到本机 kernel WireGuard，不改变 WireGuard 协议
+- STUN 不能穿透所有 NAT；对称 NAT、运营商 CGNAT 或 UDP 被封时仍需要公网转发或中继
 
 ### 方式 1：直接运行 agent（宿主机）
 
@@ -320,6 +372,22 @@ curl https://scnet-test.lonnet.uk/version
 ```
 
 这两个接口返回成功，说明 `scnet-test.lonnet.uk` 到本机后端的反向链路已经打通。
+
+检查后端是否已经把 API 和 WireGuard 地址上报给 Worker：
+
+```bash
+curl https://scnet-test.lonnet.uk/api/server-info
+```
+
+预期形态：
+
+```json
+{
+  "api_url": "https://scnet-test.lonnet.uk/api/v1",
+  "wg_endpoint": "wg.example.com:51820",
+  "updated_at": "2026-05-09T00:00:00Z"
+}
+```
 
 ## 常用运维命令
 

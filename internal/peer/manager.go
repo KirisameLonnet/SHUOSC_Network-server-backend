@@ -82,7 +82,7 @@ type PeerManagerImpl struct {
 	wgInterface      string
 	serverPrivateKey wgtypes.Key
 	listenPort       int
-	endpoint         string
+	endpointValue    func() string
 }
 
 func NewPeerManager(
@@ -95,6 +95,24 @@ func NewPeerManager(
 	listenPort int,
 	endpoint string,
 ) PeerManager {
+	return NewPeerManagerWithEndpointFunc(userStore, peerStore, ipam, wgClient, wgInterface, serverKey, listenPort, func() string {
+		return endpoint
+	})
+}
+
+func NewPeerManagerWithEndpointFunc(
+	userStore userStore,
+	peerStore peerStore,
+	ipam *IPAMImpl,
+	wgClient wgClient,
+	wgInterface string,
+	serverKey wgtypes.Key,
+	listenPort int,
+	endpointValue func() string,
+) PeerManager {
+	if endpointValue == nil {
+		endpointValue = func() string { return "" }
+	}
 	return &PeerManagerImpl{
 		userStore:        userStore,
 		peerStore:        peerStore,
@@ -103,8 +121,15 @@ func NewPeerManager(
 		wgInterface:      wgInterface,
 		serverPrivateKey: serverKey,
 		listenPort:       listenPort,
-		endpoint:         endpoint,
+		endpointValue:    endpointValue,
 	}
+}
+
+func (m *PeerManagerImpl) endpoint() string {
+	if m.endpointValue != nil {
+		return m.endpointValue()
+	}
+	return ""
 }
 
 func (m *PeerManagerImpl) AddPeer(ctx context.Context, userID string, pubKey wgtypes.Key) (*PeerRegistration, error) {
@@ -175,7 +200,7 @@ func (m *PeerManagerImpl) AddPeer(ctx context.Context, userID string, pubKey wgt
 		PublicKey:           pubKey.String(),
 		AssignedIP:          assignedIP,
 		AllowedIPs:          []string{m.ipam.subnet.String()},
-		Endpoint:            m.endpoint,
+		Endpoint:            m.endpoint(),
 		ServerPublicKey:     m.ServerPublicKey().String(),
 		PersistentKeepalive: 25,
 		Connected:           false,
@@ -259,7 +284,7 @@ func (m *PeerManagerImpl) GetPeerConfig(ctx context.Context, userID string, pubK
 		PublicKey:           targetPeer.PublicKey,
 		AssignedIP:          targetPeer.AssignedIP,
 		AllowedIPs:          []string{m.ipam.subnet.String()},
-		Endpoint:            m.endpoint,
+		Endpoint:            m.endpoint(),
 		ServerPublicKey:     m.ServerPublicKey().String(),
 		PersistentKeepalive: 25,
 		Connected:           connected,

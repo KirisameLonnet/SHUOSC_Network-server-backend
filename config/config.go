@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -14,6 +15,7 @@ type Config struct {
 	Server    ServerConfig    `yaml:"server"`
 	Database  DatabaseConfig  `yaml:"database"`
 	WireGuard WireGuardConfig `yaml:"wireguard"`
+	Punch     PunchConfig     `yaml:"punch"`
 	JWT       JWTConfig       `yaml:"jwt"`
 	Invite    InviteConfig    `yaml:"invite"`
 	Admin     AdminConfig     `yaml:"admin"`
@@ -51,6 +53,17 @@ type WireGuardConfig struct {
 	Subnet     string `yaml:"subnet"`      // default: "10.100.0.0/24"
 }
 
+// PunchConfig holds optional UDP punch/proxy settings.
+type PunchConfig struct {
+	Enabled                  bool     `yaml:"enabled"`
+	ListenPort               int      `yaml:"listen_port"`
+	WireGuardHost            string   `yaml:"wireguard_host"`
+	WireGuardPort            int      `yaml:"wireguard_port"`
+	STUNServers              []string `yaml:"stun_servers"`
+	ProbeTimeoutSeconds      int      `yaml:"probe_timeout_seconds"`
+	KeepaliveIntervalSeconds int      `yaml:"keepalive_interval_seconds"`
+}
+
 // JWTConfig holds JWT signing settings.
 type JWTConfig struct {
 	Secret      string `yaml:"secret"`
@@ -75,7 +88,7 @@ type DiscoveryConfig struct {
 	DiscoveryURL    string `yaml:"discovery_url"`    // CF Pages Function URL, e.g. "https://scnet.pages.dev/api/server-info"
 	DiscoverySecret string `yaml:"discovery_secret"` // shared secret for POST auth
 	ApiAddr         string `yaml:"api_addr"`         // default: "localhost:8080" but overridden to Lucky address
-	WgEndpoint      string `yaml:"wg_endpoint"`     // default: "localhost:51820" but overridden to Lucky address
+	WgEndpoint      string `yaml:"wg_endpoint"`      // default: "localhost:51820" but overridden to Lucky address
 }
 
 // DefaultConfig returns a Config populated with sensible defaults.
@@ -96,6 +109,13 @@ func DefaultConfig() *Config {
 			ListenPort: 51820,
 			Subnet:     "10.100.0.0/24",
 		},
+		Punch: PunchConfig{
+			Enabled:                  false,
+			ListenPort:               51280,
+			WireGuardHost:            "127.0.0.1",
+			ProbeTimeoutSeconds:      5,
+			KeepaliveIntervalSeconds: 20,
+		},
 		JWT: JWTConfig{
 			ExpiryHours: 24,
 		},
@@ -107,9 +127,8 @@ func DefaultConfig() *Config {
 			StudentID: "admin",
 		},
 		Discovery: DiscoveryConfig{
-			Enabled:  false,
-			ApiAddr:  "localhost:8080",
-			WgEndpoint: "localhost:51820",
+			Enabled: false,
+			ApiAddr: "localhost:8080",
 		},
 	}
 }
@@ -138,6 +157,7 @@ func Load(path string) (*Config, error) {
 	if err := decoder.Decode(cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
+	applyEnvOverrides(cfg)
 
 	// Validate required fields
 	if cfg.Database.Password == "" {
@@ -148,9 +168,6 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.JWT.Secret == "" {
 		return nil, fmt.Errorf("jwt.secret is required")
-	}
-	if cfg.Admin.Password == "" {
-		return nil, fmt.Errorf("admin.password is required (for bootstrap)")
 	}
 
 	return cfg, nil
@@ -170,6 +187,72 @@ func Parse(data []byte) (*Config, error) {
 	if err := decoder.Decode(cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
+	applyEnvOverrides(cfg)
 
 	return cfg, nil
+}
+
+func applyEnvOverrides(cfg *Config) {
+	if value := strings.TrimSpace(os.Getenv("SCNET_DISCOVERY_ENABLED")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			cfg.Discovery.Enabled = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SCNET_DISCOVERY_URL")); value != "" {
+		cfg.Discovery.DiscoveryURL = value
+	}
+	if value := strings.TrimSpace(os.Getenv("SCNET_DISCOVERY_SECRET")); value != "" {
+		cfg.Discovery.DiscoverySecret = value
+	} else if value := strings.TrimSpace(os.Getenv("SCNET_AGENT_TOKEN")); value != "" && cfg.Discovery.DiscoverySecret == "" {
+		cfg.Discovery.DiscoverySecret = value
+	}
+	if value := strings.TrimSpace(os.Getenv("SCNET_DISCOVERY_API_ADDR")); value != "" {
+		cfg.Discovery.ApiAddr = value
+	}
+	if value := strings.TrimSpace(os.Getenv("SCNET_WG_ENDPOINT")); value != "" {
+		cfg.Discovery.WgEndpoint = value
+	}
+	if value := strings.TrimSpace(os.Getenv("SCNET_PUNCH_ENABLED")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			cfg.Punch.Enabled = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SCNET_PUNCH_LISTEN_PORT")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil {
+			cfg.Punch.ListenPort = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SCNET_PUNCH_WG_HOST")); value != "" {
+		cfg.Punch.WireGuardHost = value
+	}
+	if value := strings.TrimSpace(os.Getenv("SCNET_PUNCH_WG_PORT")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil {
+			cfg.Punch.WireGuardPort = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SCNET_STUN_SERVERS")); value != "" {
+		cfg.Punch.STUNServers = splitCSV(value)
+	}
+	if value := strings.TrimSpace(os.Getenv("SCNET_PUNCH_PROBE_TIMEOUT_SECONDS")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil {
+			cfg.Punch.ProbeTimeoutSeconds = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SCNET_PUNCH_KEEPALIVE_SECONDS")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil {
+			cfg.Punch.KeepaliveIntervalSeconds = parsed
+		}
+	}
+}
+
+func splitCSV(value string) []string {
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }

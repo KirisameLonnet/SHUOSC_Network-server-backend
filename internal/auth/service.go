@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -29,8 +30,10 @@ type Claims struct {
 // userStore defines the minimal interface for user persistence.
 type userStore interface {
 	Create(ctx context.Context, user *model.User) error
+	RegisterBootstrapAdmin(ctx context.Context, user *model.User) error
 	RegisterWithInvite(ctx context.Context, user *model.User, inviteCode string) error
 	FindByStudentID(ctx context.Context, studentID string) (*model.User, error)
+	Count(ctx context.Context) (int, error)
 }
 
 // inviteStore defines the minimal interface for invite code persistence.
@@ -66,16 +69,11 @@ func NewAuthService(us userStore, is inviteStore, jwtSecret string, expiryHours 
 
 // Register creates a new user account using an invite code.
 func (s *AuthServiceImpl) Register(ctx context.Context, studentID, password, inviteCode string) (*model.User, error) {
+	studentID = strings.TrimSpace(studentID)
+	inviteCode = strings.TrimSpace(inviteCode)
+
 	if err := ValidatePassword(password); err != nil {
 		return nil, err
-	}
-
-	invite, err := s.inviteStore.FindByCode(ctx, inviteCode)
-	if err != nil {
-		return nil, ErrInvalidInvite
-	}
-	if invite == nil || !invite.IsAvailable() {
-		return nil, ErrInvalidInvite
 	}
 
 	existing, err := s.userStore.FindByStudentID(ctx, studentID)
@@ -84,6 +82,11 @@ func (s *AuthServiceImpl) Register(ctx context.Context, studentID, password, inv
 	}
 	if existing != nil {
 		return nil, ErrStudentIDTaken
+	}
+
+	userCount, err := s.userStore.Count(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	hashedPassword, err := HashPassword(password)
@@ -101,6 +104,31 @@ func (s *AuthServiceImpl) Register(ctx context.Context, studentID, password, inv
 		Status:    "active",
 		CreatedAt: now,
 		UpdatedAt: now,
+	}
+
+	if userCount == 0 {
+		user.Role = "admin"
+		if err := s.userStore.RegisterBootstrapAdmin(ctx, user); err != nil {
+			switch {
+			case errors.Is(err, store.ErrStudentIDTaken):
+				return nil, ErrStudentIDTaken
+			case errors.Is(err, store.ErrBootstrapClosed):
+				return nil, ErrInvalidInvite
+			}
+			return nil, err
+		}
+		return user, nil
+	}
+
+	if inviteCode == "" {
+		return nil, ErrInvalidInvite
+	}
+	invite, err := s.inviteStore.FindByCode(ctx, inviteCode)
+	if err != nil {
+		return nil, ErrInvalidInvite
+	}
+	if invite == nil || !invite.IsAvailable() {
+		return nil, ErrInvalidInvite
 	}
 
 	if err := s.userStore.RegisterWithInvite(ctx, user, inviteCode); err != nil {
