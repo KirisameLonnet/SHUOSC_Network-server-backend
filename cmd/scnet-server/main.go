@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -84,6 +85,15 @@ func main() {
 		slog.Error("failed to create IPAM", "error", err)
 		os.Exit(1)
 	}
+	wgAddress, wgHostIP, err := resolveWireGuardAddress(cfg.WireGuard.Subnet, cfg.WireGuard.Address)
+	if err != nil {
+		slog.Error("failed to resolve wireguard server address", "error", err)
+		os.Exit(1)
+	}
+	if err := ipamInstance.Reserve(wgHostIP); err != nil {
+		slog.Error("failed to reserve wireguard server address", "address", wgHostIP, "error", err)
+		os.Exit(1)
+	}
 
 	endpoint, endpointSource, punchProxy, err := resolveWireGuardEndpoint(ctx, cfg)
 	if err != nil {
@@ -115,11 +125,11 @@ func main() {
 		cfg.WireGuard.ListenPort,
 		endpointValue,
 	)
-	if err := ensureWireGuardReady(ctx, cfg.WireGuard.Interface, peerManager); err != nil {
+	if err := ensureWireGuardReady(ctx, cfg.WireGuard.Interface, wgAddress, peerManager); err != nil {
 		slog.Error("failed to initialize wireguard interface", "error", err, "interface", cfg.WireGuard.Interface)
 		os.Exit(1)
 	}
-	slog.Info("wireguard interface ready", "interface", cfg.WireGuard.Interface, "listen_port", cfg.WireGuard.ListenPort)
+	slog.Info("wireguard interface ready", "interface", cfg.WireGuard.Interface, "address", wgAddress, "listen_port", cfg.WireGuard.ListenPort)
 
 	adminService := admin.NewAdminService(userStore, peerStore, inviteStore)
 
@@ -200,8 +210,8 @@ func resolveWireGuardEndpoint(ctx context.Context, cfg *config.Config) (string, 
 	return fmt.Sprintf("%s:%d", "localhost", cfg.WireGuard.ListenPort), "fallback", nil, nil
 }
 
-func ensureWireGuardReady(ctx context.Context, iface string, pm peer.PeerManager) error {
-	if err := ensureWireGuardInterface(ctx, iface); err != nil {
+func ensureWireGuardReady(ctx context.Context, iface string, address string, pm peer.PeerManager) error {
+	if err := ensureWireGuardInterface(ctx, iface, address); err != nil {
 		return err
 	}
 	if err := pm.SetWGEnabled(true); err != nil {
@@ -210,9 +220,12 @@ func ensureWireGuardReady(ctx context.Context, iface string, pm peer.PeerManager
 	return nil
 }
 
-func ensureWireGuardInterface(ctx context.Context, iface string) error {
+func ensureWireGuardInterface(ctx context.Context, iface string, address string) error {
 	if strings.TrimSpace(iface) == "" {
 		return fmt.Errorf("wireguard interface is required")
+	}
+	if strings.TrimSpace(address) == "" {
+		return fmt.Errorf("wireguard interface address is required")
 	}
 
 	if _, err := exec.LookPath("ip"); err != nil {
@@ -222,12 +235,76 @@ func ensureWireGuardInterface(ctx context.Context, iface string) error {
 	if err := runIPCommand(ctx, "link", "add", "dev", iface, "type", "wireguard"); err != nil && !strings.Contains(err.Error(), "File exists") {
 		return fmt.Errorf("create wireguard interface %q: %w", iface, err)
 	}
+	if err := runIPCommand(ctx, "addr", "replace", address, "dev", iface); err != nil {
+		return fmt.Errorf("set wireguard interface %q address %q: %w", iface, address, err)
+	}
 
 	if err := runIPCommand(ctx, "link", "set", "up", "dev", iface); err != nil {
 		return fmt.Errorf("bring wireguard interface %q up: %w", iface, err)
 	}
 
 	return nil
+}
+
+func resolveWireGuardAddress(subnetCIDR string, configuredAddress string) (string, string, error) {
+	_, subnet, err := net.ParseCIDR(subnetCIDR)
+	if err != nil {
+		return "", "", fmt.Errorf("parse wireguard subnet: %w", err)
+	}
+	ones, bits := subnet.Mask.Size()
+	if bits != 32 {
+		return "", "", fmt.Errorf("wireguard subnet must be IPv4")
+	}
+
+	value := strings.TrimSpace(configuredAddress)
+	if value == "" {
+		ip := firstUsableIPv4(subnet)
+		if ip == nil {
+			return "", "", fmt.Errorf("wireguard subnet %s has no usable server address", subnetCIDR)
+		}
+		value = fmt.Sprintf("%s/%d", ip.String(), ones)
+	}
+
+	ip, parsedNet, err := net.ParseCIDR(value)
+	if err != nil {
+		plainIP := net.ParseIP(value)
+		if plainIP == nil || plainIP.To4() == nil {
+			return "", "", fmt.Errorf("parse wireguard address %q: %w", configuredAddress, err)
+		}
+		ip = plainIP
+		value = fmt.Sprintf("%s/%d", ip.String(), ones)
+	} else if parsedNet == nil {
+		return "", "", fmt.Errorf("parse wireguard address %q", configuredAddress)
+	}
+
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return "", "", fmt.Errorf("wireguard address %q must be IPv4", configuredAddress)
+	}
+	if !subnet.Contains(ip4) {
+		return "", "", fmt.Errorf("wireguard address %s is outside subnet %s", ip4.String(), subnet.String())
+	}
+
+	if _, _, err := net.ParseCIDR(value); err != nil {
+		return "", "", fmt.Errorf("wireguard address %q must include a valid prefix: %w", value, err)
+	}
+
+	return value, ip4.String(), nil
+}
+
+func firstUsableIPv4(subnet *net.IPNet) net.IP {
+	networkIP := subnet.IP.To4()
+	if networkIP == nil {
+		return nil
+	}
+	ones, bits := subnet.Mask.Size()
+	hostBits := bits - ones
+	if hostBits < 2 {
+		return nil
+	}
+	networkNum := uint32(networkIP[0])<<24 | uint32(networkIP[1])<<16 | uint32(networkIP[2])<<8 | uint32(networkIP[3])
+	ipNum := networkNum + 1
+	return net.IP{byte(ipNum >> 24), byte(ipNum >> 16), byte(ipNum >> 8), byte(ipNum)}
 }
 
 func runIPCommand(ctx context.Context, args ...string) error {

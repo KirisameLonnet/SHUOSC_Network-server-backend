@@ -14,6 +14,7 @@ wireguard:
   listen_port: 51820
   private_key: "${SCNET_WG_PRIVATE_KEY}"
   subnet: 10.100.0.0/24
+  address: 10.100.0.1/24
 
 punch:
   enabled: false

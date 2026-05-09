@@ -51,6 +51,7 @@ type WireGuardConfig struct {
 	ListenPort int    `yaml:"listen_port"` // default: 51820
 	PrivateKey string `yaml:"private_key"` // server WG private key (base64)
 	Subnet     string `yaml:"subnet"`      // default: "10.100.0.0/24"
+	Address    string `yaml:"address"`     // server tunnel address, e.g. "10.100.0.1/24"
 }
 
 // PunchConfig holds optional UDP punch/proxy settings.
@@ -108,6 +109,7 @@ func DefaultConfig() *Config {
 			Interface:  "wg_scnet",
 			ListenPort: 51820,
 			Subnet:     "10.100.0.0/24",
+			Address:    "10.100.0.1/24",
 		},
 		Punch: PunchConfig{
 			Enabled:                  false,
@@ -211,6 +213,9 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if value := strings.TrimSpace(os.Getenv("SCNET_WG_ENDPOINT")); value != "" {
 		cfg.Discovery.WgEndpoint = value
+	}
+	if value := strings.TrimSpace(os.Getenv("SCNET_WG_ADDRESS")); value != "" {
+		cfg.WireGuard.Address = value
 	}
 	if value := strings.TrimSpace(os.Getenv("SCNET_PUNCH_ENABLED")); value != "" {
 		if parsed, err := strconv.ParseBool(value); err == nil {

@@ -182,6 +182,26 @@ func TestPeerManagerReconcileSyncsState(t *testing.T) {
 	}
 }
 
+func TestIPAMReserveSkipsServerAddress(t *testing.T) {
+	t.Parallel()
+
+	ipam, err := NewIPAM("10.0.0.0/29")
+	if err != nil {
+		t.Fatalf("NewIPAM returned error: %v", err)
+	}
+	if err := ipam.Reserve("10.0.0.1"); err != nil {
+		t.Fatalf("Reserve returned error: %v", err)
+	}
+
+	nextIP, err := ipam.Allocate(context.Background())
+	if err != nil {
+		t.Fatalf("Allocate returned error: %v", err)
+	}
+	if nextIP != "10.0.0.2" {
+		t.Fatalf("expected next allocated IP to skip server address and be 10.0.0.2, got %s", nextIP)
+	}
+}
+
 func TestAddPeerReturnsServerPublicKeyInsteadOfPrivateKey(t *testing.T) {
 	t.Parallel()
 

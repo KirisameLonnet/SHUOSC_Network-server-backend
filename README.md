@@ -112,12 +112,14 @@ cp .env.example .env
 ```dotenv
 DB_PASSWORD=replace_with_postgres_password
 SCNET_WG_PRIVATE_KEY=replace_with_wireguard_private_key
+SCNET_WG_ADDRESS=10.100.0.1/24
 SCNET_JWT_SECRET=replace_with_long_random_secret
 ```
 
 说明：
 
 - `SCNET_WG_PRIVATE_KEY` 必须是 WireGuard 私钥（base64），可用 `wg genkey` 生成
+- `SCNET_WG_ADDRESS` 是服务端自己的隧道节点地址，默认 `10.100.0.1/24`，会从客户端地址池中保留
 - `SCNET_JWT_SECRET` 应使用足够长的随机值，例如 `openssl rand -base64 64`
 - 空库第一次通过注册页创建的账号会自动成为管理员，且不需要邀请码
 - 数据库已有用户后，注册必须提供管理员创建的邀请码
@@ -130,6 +132,7 @@ SCNET_JWT_SECRET=replace_with_long_random_secret
 
 - 数据库主机默认是 `db`
 - WireGuard 接口默认是 `wg_scnet`
+- 服务端隧道地址默认是 `10.100.0.1/24`，客户端从 `10.100.0.2` 开始分配
 - 后端监听 `8080`
 - WireGuard 监听 `51820`
 - 敏感配置通过 `${...}` 从容器环境读取
