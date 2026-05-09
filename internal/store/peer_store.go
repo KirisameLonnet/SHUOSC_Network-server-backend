@@ -76,7 +76,7 @@ func (s *peerStore) Create(ctx context.Context, peer *model.Peer) error {
 
 func (s *peerStore) FindActiveByUserID(ctx context.Context, userID uuid.UUID) ([]*model.Peer, error) {
 	query := `
-		SELECT id, user_id, public_key, assigned_ip, status, last_seen, created_at, updated_at
+		SELECT id, user_id, public_key, host(assigned_ip), status, last_seen, created_at, updated_at
 		FROM peers WHERE user_id = $1 AND status = 'active'`
 	rows, err := s.pool.Query(ctx, query, userID)
 	if err != nil {
@@ -100,7 +100,7 @@ func (s *peerStore) FindActiveByUserID(ctx context.Context, userID uuid.UUID) ([
 
 func (s *peerStore) FindByID(ctx context.Context, id uuid.UUID) (*model.Peer, error) {
 	query := `
-		SELECT id, user_id, public_key, assigned_ip, status, last_seen, created_at, updated_at
+		SELECT id, user_id, public_key, host(assigned_ip), status, last_seen, created_at, updated_at
 		FROM peers WHERE id = $1`
 	var peer model.Peer
 	err := s.pool.QueryRow(ctx, query, id).Scan(
@@ -118,7 +118,7 @@ func (s *peerStore) FindByID(ctx context.Context, id uuid.UUID) (*model.Peer, er
 
 func (s *peerStore) ListActive(ctx context.Context) ([]*model.Peer, error) {
 	query := `
-		SELECT id, user_id, public_key, assigned_ip, status, last_seen, created_at, updated_at
+		SELECT id, user_id, public_key, host(assigned_ip), status, last_seen, created_at, updated_at
 		FROM peers WHERE status = 'active'`
 	rows, err := s.pool.Query(ctx, query)
 	if err != nil {
@@ -218,7 +218,7 @@ func (s *peerStore) List(ctx context.Context, params PeerListParams) (*PeerListR
 
 	offset := (params.Page - 1) * params.PageSize
 	listQuery := fmt.Sprintf(
-		`SELECT p.id, p.user_id, p.public_key, p.assigned_ip, p.status, p.last_seen, p.created_at, p.updated_at, u.student_id
+		`SELECT p.id, p.user_id, p.public_key, host(p.assigned_ip), p.status, p.last_seen, p.created_at, p.updated_at, u.student_id
 		FROM peers p JOIN users u ON p.user_id = u.id %s ORDER BY %s %s LIMIT $%d OFFSET $%d`,
 		whereClause, sortBy, sortOrder, argIdx, argIdx+1,
 	)
@@ -300,7 +300,7 @@ func (s *peerStore) ListByUserID(ctx context.Context, userID uuid.UUID, params P
 
 	offset := (params.Page - 1) * params.PageSize
 	listQuery := fmt.Sprintf(
-		`SELECT p.id, p.user_id, p.public_key, p.assigned_ip, p.status, p.last_seen, p.created_at, p.updated_at, u.student_id
+		`SELECT p.id, p.user_id, p.public_key, host(p.assigned_ip), p.status, p.last_seen, p.created_at, p.updated_at, u.student_id
 		FROM peers p JOIN users u ON p.user_id = u.id %s ORDER BY p.created_at DESC LIMIT $%d OFFSET $%d`,
 		whereClause, argIdx, argIdx+1,
 	)
