@@ -50,6 +50,8 @@ func (h *PeerHandler) RegisterPeer(c *gin.Context) {
 			c.JSON(http.StatusConflict, gin.H{"error": "peer limit reached (max peers for this account)", "code": "TOO_MANY_PEERS"})
 		case errors.Is(err, peer.ErrPeerExists):
 			c.JSON(http.StatusConflict, gin.H{"error": "user already has an active peer with this key", "code": "PEER_EXISTS"})
+		case errors.Is(err, peer.ErrPeerRevoked):
+			c.JSON(http.StatusConflict, gin.H{"error": "peer key was revoked and cannot be reused", "code": "PEER_REVOKED"})
 		case errors.Is(err, peer.ErrAccountInactive):
 			c.JSON(http.StatusForbidden, gin.H{"error": "account is not active", "code": "FORBIDDEN"})
 		default:

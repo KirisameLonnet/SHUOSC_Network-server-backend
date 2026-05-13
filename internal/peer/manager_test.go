@@ -21,6 +21,9 @@ func (s *reconcilePeerStore) Create(context.Context, *model.Peer) error { return
 func (s *reconcilePeerStore) FindActiveByUserID(context.Context, uuid.UUID) ([]*model.Peer, error) {
 	return nil, nil
 }
+func (s *reconcilePeerStore) FindByPublicKey(context.Context, string) (*model.Peer, error) {
+	return nil, nil
+}
 func (s *reconcilePeerStore) FindByID(context.Context, uuid.UUID) (*model.Peer, error) {
 	return nil, nil
 }
@@ -30,6 +33,7 @@ func (s *reconcilePeerStore) ListActive(context.Context) ([]*model.Peer, error) 
 func (s *reconcilePeerStore) CountActiveByUserID(context.Context, uuid.UUID) (int, error) {
 	return 0, nil
 }
+func (s *reconcilePeerStore) Activate(context.Context, uuid.UUID, string) error     { return nil }
 func (s *reconcilePeerStore) UpdateStatus(context.Context, uuid.UUID, string) error { return nil }
 func (s *reconcilePeerStore) UpdatePublicKey(context.Context, uuid.UUID, string) error {
 	return nil
@@ -68,7 +72,10 @@ func (s *addPeerUserStore) FindByID(context.Context, uuid.UUID) (*model.User, er
 }
 
 type addPeerStore struct {
-	createdPeer *model.Peer
+	createdPeer   *model.Peer
+	existingPeer  *model.Peer
+	activatedPeer uuid.UUID
+	activatedIP   string
 }
 
 func (s *addPeerStore) Create(_ context.Context, peer *model.Peer) error {
@@ -78,6 +85,10 @@ func (s *addPeerStore) Create(_ context.Context, peer *model.Peer) error {
 
 func (s *addPeerStore) FindActiveByUserID(context.Context, uuid.UUID) ([]*model.Peer, error) {
 	return nil, nil
+}
+
+func (s *addPeerStore) FindByPublicKey(context.Context, string) (*model.Peer, error) {
+	return s.existingPeer, nil
 }
 
 func (s *addPeerStore) FindByID(context.Context, uuid.UUID) (*model.Peer, error) {
@@ -90,6 +101,12 @@ func (s *addPeerStore) ListActive(context.Context) ([]*model.Peer, error) {
 
 func (s *addPeerStore) CountActiveByUserID(context.Context, uuid.UUID) (int, error) {
 	return 0, nil
+}
+
+func (s *addPeerStore) Activate(_ context.Context, peerID uuid.UUID, assignedIP string) error {
+	s.activatedPeer = peerID
+	s.activatedIP = assignedIP
+	return nil
 }
 
 func (s *addPeerStore) UpdateStatus(context.Context, uuid.UUID, string) error {
@@ -199,6 +216,102 @@ func TestIPAMReserveSkipsServerAddress(t *testing.T) {
 	}
 	if nextIP != "10.0.0.2" {
 		t.Fatalf("expected next allocated IP to skip server address and be 10.0.0.2, got %s", nextIP)
+	}
+}
+
+func TestAddPeerReactivatesDisconnectedPublicKey(t *testing.T) {
+	t.Parallel()
+
+	serverPrivateKey := mustPrivateKey(t)
+	userID := uuid.New()
+	peerID := uuid.New()
+	pubKey := mustPrivateKey(t).PublicKey()
+	userStore := &addPeerUserStore{
+		user: &model.User{
+			ID:       userID,
+			Role:     "user",
+			Status:   "active",
+			MaxPeers: 5,
+		},
+	}
+	peerStore := &addPeerStore{
+		existingPeer: &model.Peer{
+			ID:         peerID,
+			UserID:     userID,
+			PublicKey:  pubKey.String(),
+			AssignedIP: "10.0.0.1",
+			Status:     "disconnected",
+		},
+	}
+	wgClient := &fakeWGClient{device: &wgtypes.Device{Name: "wg_scnet"}}
+
+	ipam, err := NewIPAM("10.0.0.0/29")
+	if err != nil {
+		t.Fatalf("NewIPAM returned error: %v", err)
+	}
+	if err := ipam.Reserve("10.0.0.1"); err != nil {
+		t.Fatalf("Reserve returned error: %v", err)
+	}
+
+	manager := NewPeerManager(userStore, peerStore, ipam, wgClient, "wg_scnet", serverPrivateKey, 51820, "vpn.example.com:51820")
+	registration, err := manager.AddPeer(context.Background(), userID.String(), pubKey)
+	if err != nil {
+		t.Fatalf("AddPeer returned error: %v", err)
+	}
+
+	if peerStore.createdPeer != nil {
+		t.Fatal("expected existing peer row to be reactivated, not recreated")
+	}
+	if peerStore.activatedPeer != peerID {
+		t.Fatalf("expected peer %s to be activated, got %s", peerID, peerStore.activatedPeer)
+	}
+	if peerStore.activatedIP != "10.0.0.2" {
+		t.Fatalf("expected reactivated peer to get 10.0.0.2, got %s", peerStore.activatedIP)
+	}
+	if registration.AssignedIP != "10.0.0.2" {
+		t.Fatalf("expected registration assigned IP 10.0.0.2, got %s", registration.AssignedIP)
+	}
+}
+
+func TestAddPeerDoesNotReactivateRevokedPublicKey(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	pubKey := mustPrivateKey(t).PublicKey()
+	userStore := &addPeerUserStore{
+		user: &model.User{
+			ID:       userID,
+			Role:     "user",
+			Status:   "active",
+			MaxPeers: 5,
+		},
+	}
+	peerStore := &addPeerStore{
+		existingPeer: &model.Peer{
+			ID:         uuid.New(),
+			UserID:     userID,
+			PublicKey:  pubKey.String(),
+			AssignedIP: "10.0.0.2",
+			Status:     "revoked",
+		},
+	}
+	wgClient := &fakeWGClient{device: &wgtypes.Device{Name: "wg_scnet"}}
+
+	ipam, err := NewIPAM("10.0.0.0/29")
+	if err != nil {
+		t.Fatalf("NewIPAM returned error: %v", err)
+	}
+
+	manager := NewPeerManager(userStore, peerStore, ipam, wgClient, "wg_scnet", mustPrivateKey(t), 51820, "vpn.example.com:51820")
+	_, err = manager.AddPeer(context.Background(), userID.String(), pubKey)
+	if err != ErrPeerRevoked {
+		t.Fatalf("expected ErrPeerRevoked, got %v", err)
+	}
+	if peerStore.activatedPeer != uuid.Nil {
+		t.Fatalf("expected revoked peer not to be activated, got %s", peerStore.activatedPeer)
+	}
+	if len(wgClient.configureCalls) != 0 {
+		t.Fatalf("expected no WireGuard changes, got %d", len(wgClient.configureCalls))
 	}
 }
 

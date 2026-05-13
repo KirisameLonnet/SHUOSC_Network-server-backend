@@ -15,9 +15,11 @@ import (
 type PeerStore interface {
 	Create(ctx context.Context, peer *model.Peer) error
 	FindActiveByUserID(ctx context.Context, userID uuid.UUID) ([]*model.Peer, error)
+	FindByPublicKey(ctx context.Context, publicKey string) (*model.Peer, error)
 	FindByID(ctx context.Context, id uuid.UUID) (*model.Peer, error)
 	ListActive(ctx context.Context) ([]*model.Peer, error)
 	CountActiveByUserID(ctx context.Context, userID uuid.UUID) (int, error)
+	Activate(ctx context.Context, peerID uuid.UUID, assignedIP string) error
 	UpdateStatus(ctx context.Context, peerID uuid.UUID, status string) error
 	UpdatePublicKey(ctx context.Context, peerID uuid.UUID, newPubKey string) error
 	UpdateLastSeen(ctx context.Context, peerID uuid.UUID, lastSeen time.Time) error
@@ -98,6 +100,24 @@ func (s *peerStore) FindActiveByUserID(ctx context.Context, userID uuid.UUID) ([
 	return peers, nil
 }
 
+func (s *peerStore) FindByPublicKey(ctx context.Context, publicKey string) (*model.Peer, error) {
+	query := `
+		SELECT id, user_id, public_key, host(assigned_ip), status, last_seen, created_at, updated_at
+		FROM peers WHERE public_key = $1`
+	var peer model.Peer
+	err := s.pool.QueryRow(ctx, query, publicKey).Scan(
+		&peer.ID, &peer.UserID, &peer.PublicKey, &peer.AssignedIP,
+		&peer.Status, &peer.LastSeen, &peer.CreatedAt, &peer.UpdatedAt,
+	)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("find peer by public key: %w", err)
+	}
+	return &peer, nil
+}
+
 func (s *peerStore) FindByID(ctx context.Context, id uuid.UUID) (*model.Peer, error) {
 	query := `
 		SELECT id, user_id, public_key, host(assigned_ip), status, last_seen, created_at, updated_at
@@ -147,6 +167,15 @@ func (s *peerStore) CountActiveByUserID(ctx context.Context, userID uuid.UUID) (
 		return 0, fmt.Errorf("count active peers by user_id: %w", err)
 	}
 	return count, nil
+}
+
+func (s *peerStore) Activate(ctx context.Context, peerID uuid.UUID, assignedIP string) error {
+	query := `UPDATE peers SET assigned_ip = $1, status = 'active', updated_at = NOW() WHERE id = $2`
+	_, err := s.pool.Exec(ctx, query, assignedIP, peerID)
+	if err != nil {
+		return fmt.Errorf("activate peer: %w", err)
+	}
+	return nil
 }
 
 func (s *peerStore) UpdateStatus(ctx context.Context, peerID uuid.UUID, status string) error {

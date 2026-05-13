@@ -16,6 +16,7 @@ import (
 var (
 	ErrTooManyPeers    = errors.New("peer limit reached")
 	ErrPeerExists      = errors.New("peer with this key already exists")
+	ErrPeerRevoked     = errors.New("peer with this key was revoked")
 	ErrNoActivePeer    = errors.New("no active peer found")
 	ErrAccountInactive = errors.New("user account is not active")
 )
@@ -27,9 +28,11 @@ type userStore interface {
 type peerStore interface {
 	Create(ctx context.Context, peer *model.Peer) error
 	FindActiveByUserID(ctx context.Context, userID uuid.UUID) ([]*model.Peer, error)
+	FindByPublicKey(ctx context.Context, publicKey string) (*model.Peer, error)
 	FindByID(ctx context.Context, id uuid.UUID) (*model.Peer, error)
 	ListActive(ctx context.Context) ([]*model.Peer, error)
 	CountActiveByUserID(ctx context.Context, userID uuid.UUID) (int, error)
+	Activate(ctx context.Context, peerID uuid.UUID, assignedIP string) error
 	UpdateStatus(ctx context.Context, peerID uuid.UUID, status string) error
 	UpdatePublicKey(ctx context.Context, peerID uuid.UUID, newPubKey string) error
 	UpdateLastSeen(ctx context.Context, peerID uuid.UUID, lastSeen time.Time) error
@@ -164,6 +167,20 @@ func (m *PeerManagerImpl) AddPeer(ctx context.Context, userID string, pubKey wgt
 		}
 	}
 
+	existingPeer, err := m.peerStore.FindByPublicKey(ctx, pubKey.String())
+	if err != nil {
+		return nil, err
+	}
+	if existingPeer != nil && existingPeer.UserID != uid {
+		return nil, ErrPeerExists
+	}
+	if existingPeer != nil && existingPeer.Status == "active" {
+		return nil, ErrPeerExists
+	}
+	if existingPeer != nil && existingPeer.Status != "disconnected" {
+		return nil, ErrPeerRevoked
+	}
+
 	assignedIP, err := m.ipam.Allocate(ctx)
 	if err != nil {
 		return nil, err
@@ -178,7 +195,28 @@ func (m *PeerManagerImpl) AddPeer(ctx context.Context, userID string, pubKey wgt
 	if err := m.wgClient.ConfigureDevice(m.wgInterface, wgtypes.Config{
 		Peers: []wgtypes.PeerConfig{peerConfig},
 	}); err != nil {
+		m.ipam.Release(ctx, assignedIP)
 		return nil, err
+	}
+
+	if existingPeer != nil {
+		if err := m.peerStore.Activate(ctx, existingPeer.ID, assignedIP); err != nil {
+			m.wgClient.ConfigureDevice(m.wgInterface, wgtypes.Config{
+				Peers: []wgtypes.PeerConfig{{PublicKey: pubKey, Remove: true}},
+			})
+			m.ipam.Release(ctx, assignedIP)
+			return nil, err
+		}
+
+		return &PeerRegistration{
+			PublicKey:           existingPeer.PublicKey,
+			AssignedIP:          assignedIP,
+			AllowedIPs:          []string{m.ipam.subnet.String()},
+			Endpoint:            m.endpoint(),
+			ServerPublicKey:     m.ServerPublicKey().String(),
+			PersistentKeepalive: 25,
+			Connected:           false,
+		}, nil
 	}
 
 	peer := &model.Peer{
